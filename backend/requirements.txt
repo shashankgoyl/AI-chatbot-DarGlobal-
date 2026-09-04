@@ -1,0 +1,25 @@
+# Versions below were resolved and import-tested together in this repo — if
+# you bump one, re-run `pip install -r requirements.txt` and re-check
+# imports rather than assuming it's still compatible (LangChain's API has
+# moved fast across major versions).
+
+fastapi
+uvicorn[standard]
+pydantic
+python-dotenv
+# Scraping
+requests
+beautifulsoup4
+lxml
+
+# LangChain / LangGraph RAG stack
+langchain
+langchain-core
+langchain-text-splitters
+langchain-community
+langchain-openai
+langgraph
+
+# Vector store + free local embeddings (FastEmbed = ONNX, no torch needed)
+faiss-cpu
+fastembed

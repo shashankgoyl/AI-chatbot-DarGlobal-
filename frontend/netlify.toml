@@ -1,0 +1,10 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+# Single-page app: send all paths to index.html so client-side routing
+# (none yet, but future-proof) and hard refreshes both work.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

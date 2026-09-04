@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.git/
+.pytest_cache/
+*.log
+# NOTE: data/raw and data/vectorstore are intentionally NOT ignored — if
+# you've run `python ingest.py` locally, the built index gets baked into
+# the image so the container boots instantly instead of re-scraping.
