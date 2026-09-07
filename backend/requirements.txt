@@ -18,6 +18,7 @@ langchain-core
 langchain-text-splitters
 langchain-community
 langchain-openai
+langchain-google-genai
 langgraph
 
 # Vector store + free local embeddings (FastEmbed = ONNX, no torch needed)

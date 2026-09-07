@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 import logging
+from typing import Optional
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import config
@@ -14,8 +17,8 @@ logger = logging.getLogger("chatbot")
 app = FastAPI(
     title="DarGlobal & Wasalt AI Chatbot",
     description="RAG chatbot over publicly scraped DarGlobal + Wasalt real-estate listings, "
-    "powered by a free OpenRouter model.",
-    version="1.0.0",
+    "powered by OpenRouter with automatic Gemini fallback.",
+    version="1.1.0",
 )
 
 app.add_middleware(
@@ -32,19 +35,74 @@ class ChatTurn(BaseModel):
     content: str
 
 
+class ChatFilters(BaseModel):
+    """All optional — only values actually present in the current scrape are
+    meaningful; see GET /api/filters for what to offer in a picker."""
+
+    source: Optional[str] = Field(default=None, description="'darglobal' or 'wasalt'")
+    location: Optional[str] = Field(default=None, description="substring match, case-insensitive")
+    beds: Optional[str] = Field(default=None, description="substring match, case-insensitive")
+    price_currency: Optional[str] = Field(default=None, description="e.g. 'AED', 'SAR', 'USD'")
+    price_min: Optional[float] = None
+    price_max: Optional[float] = None
+
+
 class ChatRequest(BaseModel):
     message: str
     history: list[ChatTurn] = Field(default_factory=list)
+    filters: ChatFilters = Field(default_factory=ChatFilters)
 
 
 class ChatResponse(BaseModel):
     answer: str
     sources: list[dict]
+    provider: str
 
 
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
+
+
+def _count_docs(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return len(data) if isinstance(data, list) else 0
+    except (FileNotFoundError, json.JSONDecodeError):
+        return 0
+
+
+@app.get("/api/stats")
+def stats():
+    """Real counts from the last successful scrape, for the UI's stat cards.
+
+    No invented numbers here — if a source hasn't been scraped yet (or
+    returned nothing), its count is honestly 0 until /api/reingest runs.
+    """
+    darglobal_count = _count_docs(config.RAW_DIR / "darglobal.json")
+    wasalt_count = _count_docs(config.RAW_DIR / "wasalt.json")
+    vectorstore_ready = (config.VECTORSTORE_DIR / "index.faiss").exists()
+
+    return {
+        "darglobal_count": darglobal_count,
+        "wasalt_count": wasalt_count,
+        "total_indexed": darglobal_count + wasalt_count,
+        "vectorstore_ready": vectorstore_ready,
+        "model": config.OPENROUTER_MODEL,
+        "fallback_model": config.GEMINI_MODEL,
+        "gemini_configured": bool(config.GEMINI_API_KEY),
+    }
+
+
+@app.get("/api/filters")
+def filters_options():
+    """Distinct source/location/beds/currency values actually present in the
+    current index, so the UI's filter picker never offers a choice that
+    would silently return nothing."""
+    from .filters import get_filter_options
+
+    return get_filter_options()
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -56,15 +114,54 @@ def chat(req: ChatRequest):
 
     try:
         history = [t.model_dump() for t in req.history]
-        result = answer_question(req.message, history)
-        return ChatResponse(answer=result["answer"], sources=result["sources"])
+        filters = req.filters.model_dump(exclude_none=True)
+        result = answer_question(req.message, history, filters)
+        return ChatResponse(answer=result["answer"], sources=result["sources"], provider=result["provider"])
     except RuntimeError as exc:
-        # e.g. missing OPENROUTER_API_KEY or empty vector store
+        # e.g. no provider configured/available, or empty vector store
         logger.error("chat failed: %s", exc)
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
         logger.exception("unexpected chat error")
         raise HTTPException(status_code=500, detail="internal error") from exc
+
+
+@app.post("/api/chat/stream")
+def chat_stream(req: ChatRequest):
+    """Server-Sent Events version of /api/chat.
+
+    Emits one JSON object per event, each as `data: <json>\\n\\n`:
+      {"type": "sources", "sources": [...]}          — once, right away
+      {"type": "token", "text": "..."}                — many, as they arrive
+      {"type": "done", "provider": "openrouter"|"gemini"}  — on success
+      {"type": "error", "message": "..."}             — on failure
+    Plain fetch + ReadableStream on the frontend, not the EventSource API,
+    since EventSource can't send a POST body (needed for history + filters).
+    """
+    if not req.message.strip():
+        raise HTTPException(status_code=400, detail="message must not be empty")
+
+    from .rag_pipeline import stream_answer
+
+    history = [t.model_dump() for t in req.history]
+    filters = req.filters.model_dump(exclude_none=True)
+
+    def event_source():
+        try:
+            for event in stream_answer(req.message, history, filters):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as exc:  # pragma: no cover — last-resort safety net
+            logger.exception("unexpected streaming error")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # keep nginx/proxies from buffering the stream
+        },
+    )
 
 
 @app.post("/api/reingest")

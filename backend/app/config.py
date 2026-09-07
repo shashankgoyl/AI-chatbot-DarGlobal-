@@ -22,6 +22,17 @@ OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free")
 OPENROUTER_SITE_URL = os.getenv("OPENROUTER_SITE_URL", "https://github.com/")
 OPENROUTER_APP_NAME = os.getenv("OPENROUTER_APP_NAME", "DarGlobal-Wasalt-AI-Chatbot")
 
+# --- Gemini (automatic fallback) -----------------------------------------
+# If OpenRouter is unset, rate-limited, or errors out, the chat pipeline
+# retries the same question with Gemini instead of failing outright. Get a
+# free key (no billing required) at https://aistudio.google.com/apikey.
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+# "gemini-flash-latest" is Google's rolling alias for their current
+# fast/free-tier-friendly model, so this keeps working as Gemini versions
+# change. Pin an exact version (e.g. "gemini-3.5-flash") if you want
+# reproducible behaviour instead.
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+
 # --- Embeddings (local, free, no API key needed) ------------------------
 # FastEmbed (ONNX) model — small, fast, no torch dependency. Good fit for
 # free-tier hosts. See https://qdrant.github.io/fastembed/ for the catalog.

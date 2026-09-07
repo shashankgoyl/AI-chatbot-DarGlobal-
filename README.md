@@ -14,7 +14,9 @@ Generation (RAG) pipeline.
 - **Scraping:** `requests` + `BeautifulSoup4`, polite (robots.txt-aware, rate-limited)
 - **RAG:** LangChain (chunking, vector store) + LangGraph (retrieve → generate graph)
 - **LLM:** any free model on [OpenRouter](https://openrouter.ai) — defaults to
-  `openrouter/free`, which auto-routes to whatever's free right now
+  `openrouter/free`, which auto-routes to whatever's free right now — with
+  automatic fallback to [Gemini](https://aistudio.google.com/apikey) if
+  OpenRouter is unset, rate-limited, or errors out
 - **Embeddings:** [FastEmbed](https://qdrant.github.io/fastembed/) — local, free, no API key, light enough for free hosting tiers
 - **Vector store:** FAISS, persisted to disk
 - **Frontend:** React + Vite, deployed as a static site on Netlify
@@ -32,6 +34,10 @@ python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\act
 pip install -r requirements.txt
 cp .env.example .env
 # edit .env and add a free OPENROUTER_API_KEY from https://openrouter.ai/keys
+# optional but recommended: also add a free GEMINI_API_KEY from
+# https://aistudio.google.com/apikey — it's used automatically as a
+# fallback if OpenRouter is unavailable, so the chatbot doesn't just go
+# down when OpenRouter's free tier rate-limits you.
 ```
 
 Scrape both sites and build the vector store **once**, up front, rather
@@ -98,8 +104,9 @@ git push -u origin main
 
 If `data/vectorstore/` ends up large (FastEmbed's model files are small,
 but a big scrape can add up), consider [Git LFS](https://git-lfs.com/) for
-that folder, or leave `AUTO_INGEST_ON_STARTUP=true` and let Render build it
-on first boot instead of committing it.
+that folder rather than skipping the commit — see the free-tier note in
+step 3 below for why `AUTO_INGEST_ON_STARTUP=true` isn't a good substitute
+on Render's free plan specifically.
 
 ---
 
@@ -116,16 +123,33 @@ on first boot instead of committing it.
    |---|---|
    | `OPENROUTER_API_KEY` | your free key from https://openrouter.ai/keys |
    | `OPENROUTER_MODEL` | `openrouter/free` (or a pinned `:free` model) |
+   | `GEMINI_API_KEY` | optional but recommended — free key from https://aistudio.google.com/apikey, used automatically if OpenRouter is unset/rate-limited/errors |
+   | `GEMINI_MODEL` | `gemini-flash-latest` (rolling alias; pin an exact version for stable behaviour) |
    | `ALLOWED_ORIGINS` | your Netlify URL, e.g. `https://your-site.netlify.app` (add it after step 4) |
-   | `AUTO_INGEST_ON_STARTUP` | `false` if you committed `data/vectorstore/`, otherwise `true` |
+   | `AUTO_INGEST_ON_STARTUP` | `false` — see the note below, this isn't optional on the free plan |
    | `ADMIN_TOKEN` | optional — a random string, enables `POST /api/reingest` |
 4. Deploy. Render will build the image from `backend/Dockerfile` and expose
    the service on a `https://<your-service>.onrender.com` URL.
 5. Confirm: `curl https://<your-service>.onrender.com/api/health`
 
-> Render's free web services spin down after inactivity and take ~30–60s to
-> wake back up on the next request — the first chat message after idle time
-> will be slow. That's expected on the free tier, not a bug.
+> **Free tier specifics (current as of writing):** 512MB RAM, no persistent
+> disk, and — this is the important one — **the container's filesystem is
+> wiped on every restart, redeploy, and idle spin-down**, not just on first
+> boot. If `AUTO_INGEST_ON_STARTUP=true` and you haven't committed
+> `data/vectorstore/`, the backend will re-scrape both live sites from
+> scratch on *every* wake-up, not just the first one — slow, and unfriendly
+> to DarGlobal/Wasalt's servers. Always run `python ingest.py` locally and
+> commit `data/raw/` + `data/vectorstore/` before deploying to Render's free
+> tier; set `AUTO_INGEST_ON_STARTUP=false` so it just loads the committed
+> index instead.
+>
+> Separately: free services spin down after **15 minutes** with no inbound
+> traffic and take **about a minute** to wake back up on the next request —
+> the first chat message after idle time (streaming or not) will hang for
+> that long before anything comes back. That's expected on the free tier,
+> not a bug. You also get 750 free instance-hours/month shared across your
+> account, which is enough for one always-idle-eligible service running
+> continuously.
 
 ---
 
@@ -169,13 +193,36 @@ Two options:
 
 ## API reference
 
-`POST /api/chat`
+`POST /api/chat` — non-streaming, tries OpenRouter then falls back to Gemini automatically
 ```json
 // request
-{ "message": "villas for sale in Riyadh", "history": [{"role": "user", "content": "..."}] }
+{
+  "message": "villas for sale in Riyadh",
+  "history": [{"role": "user", "content": "..."}],
+  "filters": { "source": "wasalt", "location": "Riyadh", "beds": "", "price_currency": "SAR", "price_min": 500000, "price_max": 3000000 }
+}
 // response
-{ "answer": "…", "sources": [{"title": "...", "url": "...", "source": "wasalt", "price": "...", "location": "..."}] }
+{
+  "answer": "…",
+  "sources": [{"title": "...", "url": "...", "source": "wasalt", "price": "...", "location": "...", "beds": "..."}],
+  "provider": "openrouter"
+}
 ```
+`filters` is optional — every field defaults to unset/any. `provider` in the response says which model actually answered (`"openrouter"` or `"gemini"`), so you can tell when the fallback kicked in.
+
+`POST /api/chat/stream` — same request body, but streams the answer back as Server-Sent Events instead of waiting for the full reply:
+```
+data: {"type": "sources", "sources": [...]}
+data: {"type": "token", "text": "Riyadh "}
+data: {"type": "token", "text": "has "}
+...
+data: {"type": "done", "provider": "openrouter"}
+```
+(or `{"type": "error", "message": "..."}` if both providers fail). Use `fetch` + a `ReadableStream` reader rather than the browser's `EventSource`, since `EventSource` can't send a POST body.
+
+`GET /api/filters` → `{ "sources": [...], "locations": [...], "beds": [...], "currencies": [...] }` — the distinct values actually present in the current index, for building a filter picker that never offers a dead-end choice.
+
+`GET /api/stats` → `{ "darglobal_count": N, "wasalt_count": M, "total_indexed": N+M, "vectorstore_ready": bool, "model": "...", "fallback_model": "...", "gemini_configured": bool }`
 
 `GET /api/health` → `{ "status": "ok" }`
 
@@ -188,8 +235,13 @@ Two options:
 - This indexes a **snapshot** of public listing pages, not a live feed —
   prices/availability can be stale. The system prompt tells the model to
   say so rather than assert stale data as current.
-- The free OpenRouter tier is rate-limited (not "unlimited"); under heavy
-  use you'll see occasional 429s bubble up as a 503 from `/api/chat`.
+- The free OpenRouter tier is rate-limited (not "unlimited"). If `GEMINI_API_KEY`
+  is set, a 429/error/missing-key on OpenRouter automatically retries the same
+  question with Gemini instead of failing — you'll only see a 503 from
+  `/api/chat` if *both* providers are unavailable.
+- Structured filters (source/location/beds/price) only narrow results as far
+  as the data supports — `beds` and `price` are parsed out of loose scraped
+  text, so treat them as best-effort, not guaranteed-accurate structured fields.
 - The scrapers are intentionally generic/defensive rather than tied to
   exact CSS classes, since both sites are actively developed products —
   expect to revisit selectors occasionally.
