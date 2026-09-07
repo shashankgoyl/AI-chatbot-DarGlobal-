@@ -65,17 +65,11 @@ def collect_listing_links(category_path: str) -> list[str]:
         url = urljoin(BASE_URL, category_path) + (f"?page={page}" if page > 1 else "")
         html = fetch(url)
         if not html:
-            print(f"[warn] no HTML returned for {url} (see [skip]/[retry] lines above for why)")
             continue
         soup = BeautifulSoup(html, "html.parser")
-        page_links = {
-            urljoin(BASE_URL, a["href"].split("?")[0])
-            for a in soup.find_all("a", href=True)
-            if LISTING_LINK_PATTERN.search(a["href"])
-        }
-        if not page_links:
-            print(f"[warn] {url} returned {len(html)} chars of HTML but 0 matching listing links")
-        links |= page_links
+        for a in soup.find_all("a", href=True):
+            if LISTING_LINK_PATTERN.search(a["href"]):
+                links.add(urljoin(BASE_URL, a["href"].split("?")[0]))
     return sorted(links)
 
 

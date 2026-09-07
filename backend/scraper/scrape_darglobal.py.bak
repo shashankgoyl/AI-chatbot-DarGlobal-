@@ -36,32 +36,22 @@ from .utils import (
     extract_main_text,
     fetch,
     guess_beds,
-    guess_location,
     guess_price,
-    main_content_links,
     save_docs,
 )
 
 BASE_URL = "https://darglobal.co.uk"
-
-# Index/directory pages: we don't know the exact shape of project detail
-# URLs in advance (they turned out to be flat paths like "/neptune" and
-# "/rayana/trump-mansions", not "/projects/<slug>"), so these are crawled
-# with main_content_links() to harvest whatever detail links they list,
-# rather than filtered through a fixed regex.
-INDEX_PATHS = [
+SEED_PATHS = [
     "/",
-    "/projects",
+    "/our-projects",
     "/insights",
     "/press",
 ]
 
-# Once we're on a detail page (project/insight/press article), only follow
-# further links that look like more of the same — this keeps the crawl
-# from wandering off into the rest of the site.
-LINK_PATTERN = re.compile(r"/(projects|insights|press)/[a-z0-9\-]+", re.IGNORECASE)
+# Links worth following: project pages, insight articles, press releases.
+LINK_PATTERN = re.compile(r"/(our-projects|projects|insights|press)/[a-z0-9\-]+", re.IGNORECASE)
 
-MAX_PAGES = 60  # keep the crawl small and polite by default
+MAX_PAGES = 40  # keep the crawl small and polite by default
 
 
 def parse_detail_page(url: str, html: str) -> ScrapedDoc | None:
@@ -90,7 +80,7 @@ def parse_detail_page(url: str, html: str) -> ScrapedDoc | None:
         content=full_text,
         price=guess_price(full_text),
         beds=guess_beds(full_text),
-        location=guess_location(full_text),
+        location=None,
         extra={"meta_description": meta_desc},
     )
 
@@ -103,8 +93,7 @@ def urlpath(url: str) -> str:
 
 def crawl() -> list[ScrapedDoc]:
     seen: set[str] = set()
-    index_urls = {BASE_URL + p for p in INDEX_PATHS}
-    to_visit: list[str] = [BASE_URL + p for p in INDEX_PATHS]
+    to_visit: list[str] = [BASE_URL + p for p in SEED_PATHS]
     docs: list[ScrapedDoc] = []
 
     while to_visit and len(seen) < MAX_PAGES:
@@ -117,27 +106,15 @@ def crawl() -> list[ScrapedDoc]:
         if not html:
             continue
 
-        is_index = url in index_urls
-        if not is_index:
-            doc = parse_detail_page(url, html)
-            if doc:
-                docs.append(doc)
-                print(f"[ok] {url} -> {len(doc.content)} chars price={doc.price} beds={doc.beds}")
-            else:
-                print(f"[skip] {url} -> too little text to be useful")
+        doc = parse_detail_page(url, html)
+        if doc:
+            docs.append(doc)
+            print(f"[ok] {url} -> {len(doc.content)} chars")
 
-        # Discover more links to follow. Index pages (the "/projects"
-        # directory etc.) get the broad main-content harvest since we
-        # don't know the URL shape of what they list; detail pages only
-        # follow the narrower LINK_PATTERN so the crawl stays bounded.
-        if is_index:
-            for link in main_content_links(html, BASE_URL):
-                if link not in seen:
-                    to_visit.append(link)
-        else:
-            for link in absolute_links(html, BASE_URL, LINK_PATTERN):
-                if link not in seen:
-                    to_visit.append(link)
+        # Discover more same-site links to follow.
+        for link in absolute_links(html, BASE_URL, LINK_PATTERN):
+            if link not in seen and link.startswith(BASE_URL):
+                to_visit.append(link)
 
     return docs
 
